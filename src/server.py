@@ -13,6 +13,7 @@ Implements:
 """
 import os
 import re
+import ipaddress
 import uuid
 import shutil
 import zipfile
@@ -106,7 +107,19 @@ def _csv_env(name: str) -> set[str]:
     return {value.strip().lower() for value in os.getenv(name, "").split(",") if value.strip()}
 
 
+def _network_env(name: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Read trusted proxy networks; invalid entries are ignored (fail closed)."""
+    networks = []
+    for value in _csv_env(name):
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            continue
+    return tuple(networks)
+
+
 TRUSTED_PROXY_CLIENTS = _csv_env("KINDLE_TRUSTED_PROXY_CLIENTS")
+TRUSTED_PROXY_NETWORKS = _network_env("KINDLE_TRUSTED_PROXY_NETWORKS")
 TRUSTED_PROXY_HOSTS = _csv_env("KINDLE_TRUSTED_PROXY_HOSTS")
 TRUSTED_PROXY_ORIGINS = _csv_env("KINDLE_TRUSTED_PROXY_ORIGINS")
 
@@ -148,7 +161,12 @@ async def enforce_loopback_only(request: Request, call_next):
         client_host = request.client.host if request.client else "unknown"
         allowed_client_hosts = {"127.0.0.1", "::1", "localhost", "testclient"}
         allowed_client_hosts.update(TRUSTED_PROXY_CLIENTS)
-        if client_host not in allowed_client_hosts:
+        try:
+            client_ip = ipaddress.ip_address(client_host)
+            trusted_network_client = any(client_ip in network for network in TRUSTED_PROXY_NETWORKS)
+        except ValueError:
+            trusted_network_client = False
+        if client_host not in allowed_client_hosts and not trusted_network_client:
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": f"Access denied: server is bound to localhost loopback only. Client IP '{client_host}' is blocked."},
