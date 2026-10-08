@@ -100,12 +100,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+def _csv_env(name: str) -> set[str]:
+    """Read a comma-separated security allow-list without exposing its values."""
+    return {value.strip().lower() for value in os.getenv(name, "").split(",") if value.strip()}
+
+
+TRUSTED_PROXY_CLIENTS = _csv_env("KINDLE_TRUSTED_PROXY_CLIENTS")
+TRUSTED_PROXY_HOSTS = _csv_env("KINDLE_TRUSTED_PROXY_HOSTS")
+TRUSTED_PROXY_ORIGINS = _csv_env("KINDLE_TRUSTED_PROXY_ORIGINS")
+
 ALLOWED_ORIGINS = {
     f"http://127.0.0.1:{PORT}",
     f"http://localhost:{PORT}",
     "http://testserver",
     f"http://testserver:{PORT}",
 }
+ALLOWED_ORIGINS.update(TRUSTED_PROXY_ORIGINS)
 ALLOWED_HOSTS = {
     f"127.0.0.1:{PORT}",
     f"localhost:{PORT}",
@@ -113,6 +124,7 @@ ALLOWED_HOSTS = {
     "testserver",
     f"testserver:{PORT}",
 }
+ALLOWED_HOSTS.update(TRUSTED_PROXY_HOSTS)
 if PORT == 80:
     ALLOWED_ORIGINS.update({"http://127.0.0.1", "http://localhost"})
     ALLOWED_HOSTS.update({"127.0.0.1", "localhost", "::1", "[::1]"})
@@ -135,6 +147,7 @@ async def enforce_loopback_only(request: Request, call_next):
     if LOCALHOST_ONLY:
         client_host = request.client.host if request.client else "unknown"
         allowed_client_hosts = {"127.0.0.1", "::1", "localhost", "testclient"}
+        allowed_client_hosts.update(TRUSTED_PROXY_CLIENTS)
         if client_host not in allowed_client_hosts:
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
