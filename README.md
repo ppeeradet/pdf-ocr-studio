@@ -1,4 +1,174 @@
-# Local Thai OCR Web
+# PDF OCR Studio — Dell tailnet deployment
+
+This repository contains the web application and runtime used to turn PDF page
+images into reviewable OCR, HTML, and EPUB artifacts. The production deployment
+described here is private to the owner's Tailscale network (tailnet).
+
+> [!IMPORTANT]
+> Keep this service **tailnet-only**. Do not enable Tailscale Funnel, expose port
+> 8000 on the router, or bind the application directly to a public interface.
+
+## Repository boundaries
+
+| Repository | Responsibility |
+| --- | --- |
+| [`ppeeradet/pdf-ocr-studio`](https://github.com/ppeeradet/pdf-ocr-studio), branch `tailscale-trusted-proxy` | Web application/runtime, OneOCR integration, local HTTP API, and explicit trusted-proxy allow-lists for Tailscale Serve. |
+| [`ppeeradet/pdf-ocr-studio-private`](https://github.com/ppeeradet/pdf-ocr-studio-private) (access required) | Private fidelity and QA workflow: Drive Queue worker, immutable OCR evidence, correction governance, human review, CP1–CP4, and Kindle release. The link works only for authorized GitHub users. |
+
+Do not commit private books, OCR results, credentials, local databases, or
+copyrighted page images to this public repository. The private repository does
+not replace this application's runtime, and this application does not declare a
+book release-ready.
+
+## Upstream relationship and production branch
+
+The application originated at
+[`anuwatm/pdf-ocr-studio`](https://github.com/anuwatm/pdf-ocr-studio). The
+`tailscale-trusted-proxy` branch in this fork keeps the upstream application and
+adds narrowly scoped support for an explicitly trusted reverse proxy. In
+particular, it accepts configured proxy client addresses/networks and validates
+the external `Host` and `Origin`; unspecified clients remain blocked when
+`LOCALHOST_ONLY=true`.
+
+The branch exists because Tailscale Serve terminates HTTPS and forwards to the
+loopback-only application. It is not a general remote-access or public-hosting
+branch. Before deploying, compare the branch with upstream and review every
+security-related change.
+
+## Production topology
+
+```text
+tailnet device
+  -> https://dell-pc.tail187694.ts.net:8443/
+  -> Tailscale Serve on Dell PC (HTTPS, tailnet only)
+  -> http://127.0.0.1:8000/
+  -> PDF OCR Studio
+```
+
+- Production checkout: `C:\KindlePipeline\vendor\pdf-ocr-studio`
+- Application bind: `127.0.0.1:8000`
+- Tailnet entry point: `https://dell-pc.tail187694.ts.net:8443/`
+- Health endpoint: `/api/health`
+
+Port 8000 must remain loopback-only. Port 8443 is managed by Tailscale Serve;
+never use Funnel for this service.
+
+## Local installation and start
+
+Use the repository-local virtual environment; do not install into global Python.
+
+```powershell
+Set-Location C:\KindlePipeline\vendor\pdf-ocr-studio
+.\install.cmd
+.\run_server.cmd
+```
+
+`run_server.cmd` starts Uvicorn at `127.0.0.1:8000` and keeps logs in the
+foreground console. For a developer checkout elsewhere, run the same scripts
+from that checkout. See [`manual.md`](manual.md) for the full application guide.
+
+## Trusted-proxy allow-lists
+
+Keep `HOST=127.0.0.1`, `PORT=8000`, and `LOCALHOST_ONLY=true`. Configure only the
+minimum values required by the installed Tailscale Serve route in the local
+`.env` (which is gitignored):
+
+```dotenv
+HOST=127.0.0.1
+PORT=8000
+LOCALHOST_ONLY=true
+KINDLE_TRUSTED_PROXY_CLIENTS=<comma-separated exact proxy client addresses>
+KINDLE_TRUSTED_PROXY_NETWORKS=<comma-separated CIDR networks, only if exact addresses are insufficient>
+KINDLE_TRUSTED_PROXY_HOSTS=dell-pc.tail187694.ts.net:8443
+KINDLE_TRUSTED_PROXY_ORIGINS=https://dell-pc.tail187694.ts.net:8443
+```
+
+The controls serve different purposes:
+
+- `KINDLE_TRUSTED_PROXY_CLIENTS`: exact immediate client addresses permitted to
+  reach the loopback-restricted middleware;
+- `KINDLE_TRUSTED_PROXY_NETWORKS`: explicitly trusted immediate-client CIDRs;
+- `KINDLE_TRUSTED_PROXY_HOSTS`: accepted HTTP `Host` values;
+- `KINDLE_TRUSTED_PROXY_ORIGINS`: accepted browser `Origin` values and CORS
+  origins.
+
+Never add `*`, a broad LAN range, or an Internet-wide CIDR. Invalid CIDRs are
+ignored (fail closed). After editing `.env`, restart only this application and
+run both local and tailnet tests below.
+
+## Health, logs, and status
+
+On the Dell PC:
+
+```powershell
+curl.exe --fail http://127.0.0.1:8000/api/health
+Get-NetTCPConnection -State Listen -LocalPort 8000
+tailscale serve status
+```
+
+Application access/error logs appear in the console that launched Uvicorn.
+Per-attempt OCR worker logs are under
+`C:\KindlePipeline\vendor\pdf-ocr-studio\files\<job-id>\worker_attempt_<n>.log`.
+Do not paste document text, credentials, or private tailnet details into issues.
+
+## Restart only the Kindle/PDF web application
+
+Run these commands from the production checkout:
+
+```powershell
+Set-Location C:\KindlePipeline\vendor\pdf-ocr-studio
+.\stop_server.cmd
+.\run_server.cmd
+```
+
+These scripts target the listener on port 8000. Do not restart Tailscale, MT5,
+Webull, Windows, global Python, or the separate private Drive Queue worker for a
+web-application-only restart. If the service is managed by a task or wrapper on
+the machine, restart that exact Kindle/PDF task instead of killing unrelated
+Python processes.
+
+## Acceptance tests
+
+From the Dell PC:
+
+```powershell
+curl.exe --fail http://127.0.0.1:8000/api/health
+curl.exe --fail https://dell-pc.tail187694.ts.net:8443/api/health
+```
+
+From another device signed in to the same tailnet:
+
+1. Open `https://dell-pc.tail187694.ts.net:8443/`.
+2. Confirm `https://dell-pc.tail187694.ts.net:8443/api/health` returns healthy.
+3. Exercise a non-sensitive test document and confirm status polling/download.
+4. Disconnect that device from the tailnet and confirm the URL is unreachable.
+
+An HTTP 403 usually means the immediate proxy client, `Host`, or `Origin` is not
+in its corresponding allow-list. Investigate the observed request path; do not
+weaken all allow-lists to make the test pass.
+
+## Rollback
+
+Before rollback, stop only this application, confirm the worktree is clean, and
+record the current commit. Then select a previously reviewed commit (the initial
+trusted-proxy production baseline was `f953b4b6`):
+
+```powershell
+Set-Location C:\KindlePipeline\vendor\pdf-ocr-studio
+.\stop_server.cmd
+git status --short --branch
+git log --oneline -10
+git switch --detach <reviewed-good-commit>
+.\run_server.cmd
+curl.exe --fail http://127.0.0.1:8000/api/health
+```
+
+Re-test the tailnet URL after local health succeeds. To return to the production
+branch, stop the app, run `git switch tailscale-trusted-proxy`, and start it
+again. Never use a destructive reset when the checkout contains uncommitted
+work or local evidence.
+
+## Full application reference
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011%20(64--bit)-0078D6.svg?logo=windows)](https://microsoft.com)
 [![Python](https://img.shields.io/badge/Python-3.10%2B%20(64--bit)-3776AB.svg?logo=python)](https://python.org)
